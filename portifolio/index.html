@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Portfólio 3D · Gestos</title>
+
+<!--
+  BIBLIOTECAS (versões fixadas para evitar quebras futuras).
+  Se uma CDN falhar, o onerror registra o nome em window.__cdnFail e a
+  interface mostra uma mensagem clara de erro.
+-->
+<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"
+        onerror="window.__cdnFail=(window.__cdnFail||[]).concat('Three.js 0.149.0')"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"
+        onerror="window.__cdnFail=(window.__cdnFail||[]).concat('MediaPipe Hands 0.4.1675469240')"></script>
+
+<style>
+  :root {
+    --bg: #05070b;
+    --fg: #e8f1f5;
+    --muted: #8fa3ad;
+    --accent: #00e5ff;
+    --danger: #ff5c7a;
+    --glass: rgba(10, 16, 24, 0.55);
+    --border: rgba(255, 255, 255, 0.12);
+    --msg-fade: 1600ms; /* sobrescrito via JS a partir do CONFIG */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; width: 100%; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { position: fixed; inset: 0; overflow: hidden; background: radial-gradient(ellipse at center, #0b1220 0%, #05070b 70%); }
+
+  /* Feed da webcam espelhado horizontalmente */
+  #video {
+    position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0;
+    object-fit: cover; transform: scaleX(-1);
+    opacity: 0.55; filter: saturate(0.8) contrast(1.05) brightness(0.8);
+  }
+  #stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.65) 100%); }
+  #three, #paint, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #three   { z-index: 2; }
+  #paint   { z-index: 3; opacity: 0; display: none; pointer-events: none; }
+  #overlay { z-index: 4; pointer-events: none; }
+
+  /* HUD */
+  .hud {
+    position: fixed; z-index: 10; top: max(14px, env(safe-area-inset-top)); left: 14px; right: 14px;
+    display: flex; gap: 10px; pointer-events: none; flex-wrap: wrap; align-items: center;
+  }
+  .hud .push { margin-left: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 12px; border-radius: 999px; font-size: 12px; letter-spacing: .04em;
+    background: var(--glass); border: 1px solid var(--border);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background .3s, box-shadow .3s; }
+  .dot.on { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .dot.warn { background: #ffb020; box-shadow: 0 0 10px #ffb020; }
+  .dot.ok { background: #38ef7d; box-shadow: 0 0 10px #38ef7d; }
+  #modeChip { color: var(--fg); }
+
+  /* Menu lateral de modos */
+  #sidebar {
+    position: fixed; z-index: 11; left: max(12px, env(safe-area-inset-left)); top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 10px; padding: 10px; border-radius: 20px;
+    background: var(--glass); border: 1px solid var(--border);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+  .mode-btn {
+    position: relative; width: 46px; height: 46px; border-radius: 14px; border: 1px solid transparent;
+    background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center;
+    transition: color .2s, background .2s, border-color .2s, box-shadow .2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mode-btn svg { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .mode-btn:hover, .mode-btn:focus-visible { color: var(--fg); background: rgba(255,255,255,.07); outline: none; }
+  .mode-btn.active {
+    color: var(--accent); background: rgba(0,229,255,.12); border-color: rgba(0,229,255,.45);
+    box-shadow: 0 0 18px rgba(0,229,255,.25);
+  }
+  .mode-btn.active::before {
+    content: ""; position: absolute; left: -11px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px;
+    background: var(--accent); box-shadow: 0 0 10px var(--accent);
+  }
+  .mode-btn .tip {
+    position: absolute; left: calc(100% + 14px); top: 50%; transform: translateY(-50%) translateX(-4px);
+    white-space: nowrap; font-size: 12px; letter-spacing: .04em; padding: 6px 10px; border-radius: 8px;
+    background: rgba(10,16,24,.92); border: 1px solid var(--border); color: var(--fg);
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  }
+  .mode-btn:hover .tip, .mode-btn:focus-visible .tip { opacity: 1; transform: translateY(-50%); }
+
+  /* Instrução inicial */
+  #hint {
+    position: fixed; z-index: 9; left: 50%; bottom: max(12vh, 90px); transform: translateX(-50%);
+    padding: 14px 22px; border-radius: 16px; text-align: center; max-width: calc(100vw - 32px);
+    background: var(--glass); border: 1px solid var(--border);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    font-size: clamp(14px, 2.4vw, 17px); letter-spacing: .02em;
+    transition: opacity .6s ease, transform .6s ease;
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  #hint small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+  #hint.hide { opacity: 0; transform: translateX(-50%) translateY(10px); pointer-events: none; animation: none; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(0,229,255,.0); } 50% { box-shadow: 0 0 30px 0 rgba(0,229,255,.25); } }
+
+  /* Linha de scanner: só roda enquanto NÃO há mão no quadro (display:none = para na hora) */
+  #scanner { position: fixed; inset: 0; z-index: 8; pointer-events: none; display: none; }
+  #scanner.running { display: block; }
+  #scanner .line {
+    position: absolute; left: 0; right: 0; height: 3px; top: 0;
+    background: linear-gradient(90deg, transparent, var(--accent), #fff, var(--accent), transparent);
+    box-shadow: 0 0 24px 6px rgba(0,229,255,.7), 0 0 80px 20px rgba(124,92,255,.35);
+    animation: sweep 2.6s cubic-bezier(.45,.05,.55,.95) infinite alternate;
+  }
+  @keyframes sweep { from { top: 0; } to { top: calc(100% - 3px); } }
+
+  /* Flash curto de desbloqueio (não é a linha de scanner) */
+  #flash { position: fixed; inset: 0; z-index: 7; pointer-events: none; opacity: 0;
+    background: radial-gradient(circle at center, rgba(0,229,255,.35), transparent 65%); }
+  #flash.go { animation: flash .9s ease-out; }
+  @keyframes flash { 0% { opacity: 0; transform: scale(.7); } 25% { opacity: 1; } 100% { opacity: 0; transform: scale(1.25); } }
+
+  /* Mensagem "Mão detectada / Desbloqueado": fade-in rápido, fade-out suave */
+  #msg {
+    position: fixed; z-index: 12; left: 50%; top: 18%; transform: translateX(-50%);
+    padding: 14px 26px; border-radius: 14px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    font-size: clamp(13px, 2.6vw, 16px); color: #021014; background: #38ef7d;
+    box-shadow: 0 0 40px rgba(56,239,125,.55); text-align: center; max-width: calc(100vw - 32px);
+    opacity: 0; pointer-events: none; transition: opacity var(--msg-fade) ease;
+  }
+  #msg.show { opacity: 1; transition: opacity .3s ease; }
+
+  /* Paleta do pincel */
+  #palette {
+    position: fixed; z-index: 11; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--border);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    opacity: 0; pointer-events: none;
+  }
+  .swatch {
+    width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+  }
+  .swatch.sel { border-color: #fff; transform: scale(1.12); }
+  .swatch.hot, #btnClear.hot { transform: scale(1.18); }
+  #btnClear {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,.06);
+    color: var(--fg); font-size: 12px; letter-spacing: .06em; cursor: pointer; text-transform: uppercase; transition: transform .15s, background .15s;
+  }
+  #btnClear:hover { background: rgba(255,255,255,.14); }
+
+  /* Labels digitais (modo flor) */
+  #readout {
+    position: fixed; z-index: 10; right: max(14px, env(safe-area-inset-right)); top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 12px; opacity: 0; pointer-events: none;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .ro {
+    min-width: 150px; padding: 10px 14px; border-radius: 12px;
+    background: rgba(10,6,12,.6); border: 1px solid rgba(255,45,85,.45);
+    box-shadow: 0 0 22px rgba(255,45,85,.18), inset 0 0 14px rgba(255,45,85,.08);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .ro .k { font-size: 10px; letter-spacing: .28em; color: #ff8aa0; }
+  .ro .v { font-size: 28px; font-weight: 600; letter-spacing: .06em; color: #ffd6de; text-shadow: 0 0 12px rgba(255,45,85,.9); }
+  .ro .bar { margin-top: 6px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+  .ro .bar i { display: block; height: 100%; width: 100%; transform-origin: left; transform: scaleX(0);
+    background: linear-gradient(90deg, #ff2d55, #ffb3c1); box-shadow: 0 0 10px #ff2d55; }
+
+  /* Botão de ajuda / tutorial */
+  .sep { height: 1px; background: var(--border); margin: 2px 6px; }
+  .help-btn {
+    position: relative; width: 46px; height: 46px; border-radius: 14px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 18px; font-weight: 600;
+    display: grid; place-items: center; transition: color .2s, background .2s;
+  }
+  .help-btn:hover, .help-btn:focus-visible { color: var(--fg); background: rgba(255,255,255,.07); outline: none; }
+  .help-btn .tip {
+    position: absolute; left: calc(100% + 14px); top: 50%; transform: translateY(-50%) translateX(-4px);
+    white-space: nowrap; font-size: 12px; letter-spacing: .04em; padding: 6px 10px; border-radius: 8px; font-weight: 400;
+    background: rgba(10,16,24,.92); border: 1px solid var(--border); color: var(--fg);
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  }
+  .help-btn:hover .tip, .help-btn:focus-visible .tip { opacity: 1; transform: translateY(-50%); }
+
+  /* Card de tutorial (aparece ao trocar de modo) */
+  #tutorial {
+    position: fixed; z-index: 13; left: calc(max(12px, env(safe-area-inset-left)) + 74px); top: 50%;
+    transform: translateY(-50%) translateX(-8px); width: min(310px, calc(100vw - 110px));
+    padding: 16px 16px 12px; border-radius: 16px; background: rgba(8,13,20,.84);
+    border: 1px solid rgba(0,229,255,.3); box-shadow: 0 0 30px rgba(0,229,255,.12);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease;
+  }
+  #tutorial.show { opacity: 1; pointer-events: auto; transform: translateY(-50%); }
+  #tutTitle { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  #tutList { list-style: none; margin: 10px 0 6px; display: flex; flex-direction: column; gap: 9px; }
+  #tutList li { font-size: 13px; line-height: 1.45; color: #cfe0e8; padding-left: 16px; position: relative; }
+  #tutList li::before { content: ""; position: absolute; left: 0; top: .55em; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #tutList b { color: #fff; font-weight: 600; }
+  #tutList code { font-family: ui-monospace, Menlo, Consolas, monospace; color: #ff9db0; background: rgba(255,45,85,.12);
+    padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+  #tutNote { font-size: 12px; color: #ffb020; margin: 2px 0 6px; }
+  #tutNote:empty { display: none; }
+  .t-foot { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+  .t-timer { flex: 1; height: 3px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+  .t-timer i { display: block; height: 100%; width: 100%; transform-origin: left; background: var(--accent); }
+  @keyframes tutTimer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  #tutOk { padding: 7px 14px; border-radius: 999px; border: 0; background: var(--accent); color: #021014;
+    font-weight: 600; font-size: 12px; cursor: pointer; }
+  #tutOk:hover { filter: brightness(1.1); }
+
+  /* Seletor de formas (Modo 1) */
+  #shapebar {
+    position: fixed; z-index: 11; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--border);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    opacity: 0; pointer-events: none;
+  }
+  .shp {
+    display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: 999px;
+    border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer;
+    font-size: 12px; letter-spacing: .05em; transition: color .2s, background .2s, border-color .2s, box-shadow .2s;
+  }
+  .shp svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .shp:hover { color: var(--fg); background: rgba(255,255,255,.07); }
+  .shp.sel { color: var(--accent); background: rgba(0,229,255,.12); border-color: rgba(0,229,255,.45); box-shadow: 0 0 14px rgba(0,229,255,.25); }
+
+  /* Variante ciano dos labels (Modo 1) */
+  #readout.cyan .ro { border-color: rgba(0,229,255,.45); box-shadow: 0 0 22px rgba(0,229,255,.16), inset 0 0 14px rgba(0,229,255,.07); }
+  #readout.cyan .ro .k { color: #8aefff; }
+  #readout.cyan .ro .v { color: #d6fbff; text-shadow: 0 0 12px rgba(0,229,255,.9); }
+  #readout.cyan .ro .bar i { background: linear-gradient(90deg, #00b8d4, #b3f5ff); box-shadow: 0 0 10px #00e5ff; }
+
+  @media (max-width: 600px) {
+    #tutorial { left: 64px; right: 12px; width: auto; top: 104px; transform: translateY(-8px); }
+    #tutorial.show { transform: none; }
+    #tutList li { font-size: 12px; }
+    #shapebar { gap: 2px; padding: 6px; }
+    .shp { padding: 8px 9px; font-size: 11px; }
+    .shp svg { display: none; }
+    .help-btn { width: 40px; height: 40px; }
+  }
+
+  /* Painel de erro */
+  #panel {
+    position: fixed; inset: 0; z-index: 20; display: none; align-items: center; justify-content: center;
+    padding: 24px; background: rgba(5,7,11,.82); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  #panel.show { display: flex; }
+  #panel .card { max-width: 460px; width: 100%; padding: 26px; border-radius: 20px; background: #0b121b; border: 1px solid var(--border); text-align: center; }
+  #panel h2 { font-size: 18px; margin-bottom: 10px; color: var(--danger); }
+  #panel p { color: var(--muted); font-size: 14px; line-height: 1.55; }
+  #panel button { margin-top: 18px; padding: 11px 22px; border-radius: 999px; border: 0; cursor: pointer; background: var(--accent); color: #021014; font-weight: 600; font-size: 14px; }
+  #panel button:hover { filter: brightness(1.1); }
+
+  @media (max-width: 600px) {
+    .chip { font-size: 11px; padding: 6px 10px; }
+    .mode-btn { width: 40px; height: 40px; }
+    #sidebar { padding: 8px; gap: 8px; }
+    .ro { min-width: 110px; padding: 8px 10px; }
+    .ro .v { font-size: 20px; }
+    .swatch { width: 30px; height: 30px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="three"></canvas>
+  <canvas id="paint"></canvas>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="scanner"><div class="line"></div></div>
+<div id="flash"></div>
+
+<div class="hud">
+  <div class="chip"><span class="dot" id="dotCam"></span><span id="statusCam">Iniciando…</span></div>
+  <div class="chip"><span class="dot" id="dotHand"></span><span id="statusHand">Aguardando</span></div>
+  <div class="chip" id="modeChip">Modo —</div>
+  <div class="chip push" id="chipFps"><span id="fpsText">— FPS</span></div>
+</div>
+
+<nav id="sidebar" aria-label="Modos de interação">
+  <button class="mode-btn" data-mode="0" aria-label="Formas geométricas 3D">
+    <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
+    <span class="tip">1 · Formas 3D</span>
+  </button>
+  <button class="mode-btn" data-mode="1" aria-label="Pincel virtual">
+    <svg viewBox="0 0 24 24"><path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 013 3L8 19l-4 1z"/><path d="M14.5 6.5l3 3"/></svg>
+    <span class="tip">2 · Pincel no ar</span>
+  </button>
+  <button class="mode-btn" data-mode="2" aria-label="Flor Higanbana">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8"/><path d="M12 10C10 6 11 3 12 2c1 1 2 4 0 8zM14 12c4-2 7-1 8 0-1 1-4 2-8 0zM12 14c2 4 1 7 0 8-1-1-2-4 0-8zM10 12C6 14 3 13 2 12c1-1 4-2 8 0z"/></svg>
+    <span class="tip">3 · Higanbana</span>
+  </button>
+  <div class="sep"></div>
+  <button class="help-btn" id="btnHelp" aria-label="Mostrar tutorial">?<span class="tip">Tutorial</span></button>
+</nav>
+
+<div id="palette"></div>
+
+<div id="shapebar" role="group" aria-label="Escolher forma geométrica">
+  <button class="shp" data-shape="0" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Cubo
+  </button>
+  <button class="shp" data-shape="1" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M12 2l9 7-3.5 11h-11L3 9l9-7z"/><path d="M12 2L7 20M12 2l5 18M3 9h18"/></svg>Icosaedro
+  </button>
+  <button class="shp" data-shape="2" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M12 3L3 19h18L12 3z"/><path d="M12 3l3 16M12 3L9 19"/></svg>Pirâmide
+  </button>
+  <button class="shp" data-shape="3" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="5.5"/><ellipse cx="12" cy="12" rx="3.4" ry="1.8"/></svg>Toro
+  </button>
+</div>
+
+<div id="tutorial" role="dialog" aria-live="polite" aria-label="Tutorial do modo">
+  <div id="tutTitle"></div>
+  <ul id="tutList"></ul>
+  <p id="tutNote"></p>
+  <div class="t-foot">
+    <div class="t-timer"><i id="tutTimer"></i></div>
+    <button id="tutOk">Entendi</button>
+  </div>
+</div>
+
+<div id="readout">
+  <div class="ro" id="ro0"><div class="k" id="roK0">GROW</div><div class="v" id="roV0">0%</div><div class="bar"><i id="roB0"></i></div></div>
+  <div class="ro" id="ro1"><div class="k" id="roK1">BLOOM</div><div class="v" id="roV1">0%</div><div class="bar"><i id="roB1"></i></div></div>
+</div>
+
+<div id="hint">Mostre a mão aberta para começar<small>Mantenha a palma voltada para a câmera</small></div>
+<div id="msg">Mão detectada · Desbloqueado</div>
+
+<div id="panel">
+  <div class="card">
+    <h2 id="panelTitle">Erro</h2>
+    <p id="panelMsg"></p>
+    <button id="panelBtn" style="display:none">Tentar novamente</button>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   CONFIGURAÇÃO — ajuste aqui sem mexer na lógica
+   ===================================================================== */
+const CONFIG = {
+
+  /* ---------- RASTREAMENTO ---------- */
+  maxNumHands: 2,                 // quantas mãos rastrear ao mesmo tempo (1 ou 2)
+  modelComplexity: 1,             // 0 = mais rápido (celulares fracos), 1 = mais preciso
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.5,
+  cameraIdeal: { width: 1280, height: 720, frameRate: 60 },
+  handLostTimeoutMs: 400,         // ms sem detecção até considerar que a mão saiu do quadro
+
+  /* ---------- DESBLOQUEIO (mão aberta) ---------- */
+  requireUnlock: true,            // true = os modos só reagem depois do 1º desbloqueio
+  fingerExtendThreshold: 0.12,    // quão estendido o dedo precisa estar (0.05 permissivo … 0.2 rígido)
+  openHandStableFrames: 4,        // quadros consecutivos de mão aberta para desbloquear
+  unlockMessageMs: 10000,         // tempo que "Mão detectada / Desbloqueado" fica visível
+  unlockMessageFadeMs: 1600,      // duração do fade-out suave da mensagem
+
+  /* ---------- MOVIMENTO (comum a todos os modos) ---------- */
+  motionSensitivity: 1.0,         // 1.0 = objeto exatamente sob a palma; >1 amplifica o movimento
+  depthSensitivity: 8,            // efeito de aproximar/afastar a mão (0 desativa)
+  referenceHandSize: 0.25,        // tamanho "normal" da mão (fração da altura do vídeo)
+  smoothing: 12,                  // amortecimento: maior = mais responsivo; menor = mais suave (6–18)
+  tiltIntensity: 1.0,             // quanto a rotação da palma é aplicada aos objetos 3D
+
+  /* ---------- TRANSIÇÃO ENTRE MODOS ---------- */
+  modeFadeInMs: 350,
+  modeFadeOutMs: 250,
+  hoverSwitchDelayMs: 90,         // atraso ao passar o mouse sobre o ícone (evita trocas acidentais)
+  tutorialAutoHideMs: 12000,      // tempo até o card de tutorial sumir sozinho (ou clique em "Entendi")
+
+  /* ---------- MODO 1 · FORMAS ---------- */
+  shapeBaseScale: 0.9,            // tamanho base da forma (1.0 ≈ 1 unidade 3D; ajuste ao gosto)
+  shapeMinStretch: 0.5,           // escala mínima pela pinça
+  shapeMaxStretch: 3.2,           // escala máxima pela pinça
+  pinchMin: 0.12,                 // razão polegar-indicador / tamanho da mão = "dedos juntos"
+  pinchMax: 1.10,                 // razão = "dedos bem abertos"
+  pinchEngageRatio: 0.40,         // abaixo disso a pinça escala mesmo sem a pose "compasso"
+  stretchSmoothing: 10,
+
+  /* ---------- MODO 2 · PINCEL ---------- */
+  brushSize: 6,                   // espessura do traço (px CSS)
+  brushSmoothing: 22,             // suavização do cursor (maior = mais colado ao dedo)
+  brushColors: ["#39ff14", "#ff2d55", "#9fd8ff"], // verde neon, vermelho, azul claro
+  clearHoldMs: 1200,              // tempo com a mão aberta parada para limpar a tela
+  swatchDwellMs: 450,             // tempo com o dedo sobre uma cor/botão para selecionar
+
+  /* ---------- MODO 3 · FLOR HIGANBANA ---------- */
+  flowerStems: 5,                 // caules por mão
+  flowerScale: 1.0,               // escala geral do conjunto
+  flowerSize: 0.55,               // tamanho de cada flor
+  growSmoothing: 3.5,             // velocidade do crescimento (menor = mais orgânico/lento)
+  bloomSmoothing: 5,              // velocidade do desabrochar
+  growHeightBottom: 0.80,         // altura da palma (fração da tela, 0 = topo) que dá grow = 0
+  growHeightTop: 0.15,            // altura da palma que dá grow = 1
+  growDistMin: 0.12,              // distância entre as mãos (fração da largura) que dá grow = 0
+  growDistMax: 0.65,              // distância entre as mãos que dá grow = 1
+  opennessClosed: 0.80,           // abertura dos dedos considerada "fechada" (bloom 0)
+  opennessOpen: 1.75,             // abertura considerada "totalmente aberta" (bloom 1)
+
+  showFps: true,
+};
+
+const MEDIAPIPE_HANDS_VERSION = "0.4.1675469240"; // deve coincidir com a tag <script> acima
+
+/* =====================================================================
+   UTILITÁRIOS E ELEMENTOS
+   ===================================================================== */
+const $ = (id) => document.getElementById(id);
+const video = $("video"), overlay = $("overlay"), octx = overlay.getContext("2d");
+const paint = $("paint"), pctx = paint.getContext("2d");
+const hintEl = $("hint"), scannerEl = $("scanner"), flashEl = $("flash"), msgEl = $("msg");
+const paletteEl = $("palette"), readoutEl = $("readout"), shapebarEl = $("shapebar"), tutEl = $("tutorial");
+const panel = $("panel"), panelTitle = $("panelTitle"), panelMsg = $("panelMsg"), panelBtn = $("panelBtn");
+
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const damp = (k, dt) => 1 - Math.exp(-k * dt);               // fator de lerp independente de FPS
+const smoothstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+document.documentElement.style.setProperty("--msg-fade", CONFIG.unlockMessageFadeMs + "ms");
+if (!CONFIG.showFps) $("chipFps").style.display = "none";
+
+function setCam(text, cls) { $("statusCam").textContent = text; $("dotCam").className = "dot " + (cls || ""); }
+function setHand(text, cls) { $("statusHand").textContent = text; $("dotHand").className = "dot " + (cls || ""); }
+function showPanel(title, msg, retry) {
+  panelTitle.textContent = title; panelMsg.innerHTML = msg;
+  panelBtn.style.display = retry ? "inline-block" : "none"; panelBtn.onclick = retry || null;
+  panel.classList.add("show");
+}
+const hidePanel = () => panel.classList.remove("show");
+
+// Libera geometrias, materiais e texturas de uma árvore Three.js e a remove da cena.
+function disposeTree(root) {
+  if (!root) return;
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
+  });
+  if (root.parent) root.parent.remove(root);
+}
+
+/* =====================================================================
+   ESTADO GLOBAL
+   ===================================================================== */
+const state = {
+  vw: 1280, vh: 720,              // resolução real do vídeo
+  cw: innerWidth, ch: innerHeight, dpr: 1,
+  hands: [],                      // mãos analisadas (ordenadas da esquerda p/ direita na tela)
+  lastHandTime: -1e9,
+  ready: false,                   // câmera + modelo prontos
+  unlocked: false, openFrames: 0,
+  detCount: 0, detFps: 0, renderCount: 0, renderFps: 0,
+};
+
+/* =====================================================================
+   THREE.JS — cena base
+   ===================================================================== */
+const FOV = 45, CAM_Z = 5;
+let renderer, scene, camera, visW = 4, visH = 4, UP, tmpP, tmpT;
+
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ canvas: $("three"), antialias: true, alpha: true });
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.setClearColor(0x000000, 0);
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 50);
+  camera.position.set(0, 0, CAM_Z);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+  const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(-2, 3, 4); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x66ccff, 0.35); rim.position.set(3, -1, 2); scene.add(rim);
+  UP = new THREE.Vector3(0, 1, 0); tmpP = new THREE.Vector3(); tmpT = new THREE.Vector3();
+}
+
+function resize() {
+  state.dpr = Math.min(devicePixelRatio || 1, 2);
+  state.cw = innerWidth; state.ch = innerHeight;
+  const W = Math.round(state.cw * state.dpr), H = Math.round(state.ch * state.dpr);
+  overlay.width = W; overlay.height = H;
+  // O canvas de pintura preserva o desenho ao redimensionar
+  if (paint.width !== W || paint.height !== H) {
+    const tmp = document.createElement("canvas"); tmp.width = paint.width; tmp.height = paint.height;
+    tmp.getContext("2d").drawImage(paint, 0, 0);
+    paint.width = W; paint.height = H;
+    if (tmp.width && tmp.height) pctx.drawImage(tmp, 0, 0, W, H);
+  }
+  visH = 2 * Math.tan((FOV * Math.PI) / 360) * CAM_Z;
+  if (renderer) {
+    renderer.setPixelRatio(state.dpr);
+    renderer.setSize(state.cw, state.ch, false);
+    camera.aspect = state.cw / state.ch; camera.updateProjectionMatrix();
+  }
+  visW = visH * (state.cw / state.ch);
+}
+addEventListener("resize", resize);
+
+// Posição de tela normalizada (-1..1) + profundidade → coordenada de mundo.
+// Compensa a perspectiva para o objeto ficar exatamente sob a palma na tela.
+function toWorld(nx, ny, z, out) {
+  const k = (CAM_Z - z) / CAM_Z, s = CONFIG.motionSensitivity;
+  return out.set(nx * (visW / 2) * k * s, ny * (visH / 2) * k * s, z);
+}
+
+// Mapeamento vídeo → tela respeitando object-fit: cover
+function screenMap() {
+  const sc = Math.max(state.cw / state.vw, state.ch / state.vh);
+  const dw = state.vw * sc, dh = state.vh * sc;
+  return { dw, dh, ox: (state.cw - dw) / 2, oy: (state.ch - dh) / 2 };
+}
+
+/* =====================================================================
+   ANÁLISE DE GESTOS (executada a cada resultado do MediaPipe)
+   ===================================================================== */
+// Ponto em espaço "tela espelhada": x → direita, y → cima, z → em direção ao espectador.
+function P(lm) { return { x: (1 - lm.x) * state.vw, y: -lm.y * state.vh, z: -lm.z * state.vw }; }
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+const len3 = (a) => Math.hypot(a.x, a.y, a.z);
+const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+
+/*
+  Converte os 21 landmarks em um objeto com tudo que os modos precisam:
+  - ext[0..4]  : dedo estendido? (polegar, indicador, médio, anelar, mindinho)
+      Dedos 1–4: ponta (8,12,16,20) vs articulação (6,10,14,18) projetada no eixo pulso→base do
+      dedo médio (equivale ao eixo vertical com a mão em pé, mas funciona com a mão inclinada).
+      Polegar: eixo horizontal, pela distância ao centro da palma (ponta 4 vs junta 2).
+  - isOpen     : os 5 dedos estendidos (gesto de desbloqueio / limpar tela)
+  - pointing   : só o indicador estendido (gesto de desenhar)
+  - caliper    : médio, anelar e mindinho dobrados (polegar+indicador viram um "compasso")
+  - openness   : 0 (punho) … 1 (dedos bem abertos), média da distância ponta→pulso
+  - pinchRatio / pinchNorm : distância polegar–indicador relativa ao tamanho da mão
+  - nx, ny     : centro da palma (média dos landmarks 0,5,9,13,17) em coordenadas de tela -1..1
+  - yaw/pitch/roll, z : inclinação e profundidade (escala da mão)
+*/
+function analyze(lms) {
+  const p = lms.map(P), sm = screenMap();
+  const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const handLen = d2(p[0], p[9]) || 1;
+  const ax = (p[9].x - p[0].x) / handLen, ay = (p[9].y - p[0].y) / handLen;
+  const margin = CONFIG.fingerExtendThreshold * handLen;
+
+  const tipIdx = [8, 12, 16, 20], pipIdx = [6, 10, 14, 18];
+  const ext = [false, false, false, false, false];
+  for (let i = 0; i < 4; i++) {
+    const t = p[tipIdx[i]], b = p[pipIdx[i]];
+    ext[i + 1] = ((t.x - b.x) * ax + (t.y - b.y) * ay) > margin;
+  }
+  ext[0] = (Math.abs(p[4].x - p[9].x) - Math.abs(p[2].x - p[9].x)) > margin * 0.6;
+
+  const isOpen = ext.every(Boolean);
+  const pointing = ext[1] && !ext[2] && !ext[3] && !ext[4];
+  const caliper = !ext[2] && !ext[3] && !ext[4];
+
+  let sum = 0; for (const i of tipIdx) sum += d2(p[i], p[0]) / handLen;
+  const openness = clamp((sum / 4 - CONFIG.opennessClosed) / (CONFIG.opennessOpen - CONFIG.opennessClosed), 0, 1);
+
+  const pinchRatio = d2(p[4], p[8]) / handLen;
+  const pinchNorm = clamp((pinchRatio - CONFIG.pinchMin) / (CONFIG.pinchMax - CONFIG.pinchMin), 0, 1);
+
+  // Centro da palma
+  let cx = 0, cy = 0;
+  for (const i of [0, 5, 9, 13, 17]) { cx += lms[i].x; cy += lms[i].y; }
+  cx /= 5; cy /= 5;
+  const sx = sm.ox + (1 - cx) * sm.dw, sy = sm.oy + cy * sm.dh;
+  const ix = sm.ox + (1 - lms[8].x) * sm.dw, iy = sm.oy + lms[8].y * sm.dh; // ponta do indicador
+
+  // Profundidade pela escala da mão
+  const size = handLen / state.vh;
+  const z = clamp((size - CONFIG.referenceHandSize) * CONFIG.depthSensitivity, -2.5, 2.2);
+
+  // Normal da palma (pulso, base do indicador, base do mindinho) → yaw/pitch
+  let n = cross(sub(p[5], p[0]), sub(p[17], p[0]));
+  const nl = len3(n) || 1; n = { x: n.x / nl, y: n.y / nl, z: n.z / nl };
+  if (n.z < 0) n = { x: -n.x, y: -n.y, z: -n.z };
+  const yaw = clamp(Math.atan2(n.x, n.z), -1.1, 1.1);
+  const pitch = clamp(-Math.atan2(n.y, n.z), -1.1, 1.1);
+  const v = sub(p[9], p[0]);
+  const roll = clamp(-Math.atan2(v.x, v.y), -1.4, 1.4);
+
+  return {
+    lms, ext, isOpen, pointing, caliper, openness, pinchRatio, pinchNorm,
+    sx, sy, ix, iy, nx: (sx / state.cw) * 2 - 1, ny: -((sy / state.ch) * 2 - 1),
+    size, z, yaw, pitch, roll,
+  };
+}
+
+function onResults(results) {
+  state.detCount++;
+  const list = results.multiHandLandmarks || [];
+  if (!list.length) { state.openFrames = 0; return; }
+  // Ordena da esquerda para a direita → "slots" estáveis (mão 0 = esquerda da tela)
+  state.hands = list.map(analyze).sort((a, b) => a.sx - b.sx);
+  state.lastHandTime = performance.now();
+
+  // Gatilho de desbloqueio: mão aberta estável por alguns quadros
+  if (!state.unlocked) {
+    state.openFrames = state.hands.some((h) => h.isOpen) ? state.openFrames + 1 : 0;
+    if (state.openFrames >= CONFIG.openHandStableFrames) unlock();
+  }
+}
+
+let msgTimer;
+function unlock() {
+  state.unlocked = true;
+  hintEl.classList.add("hide");
+  flashEl.classList.remove("go"); void flashEl.offsetWidth; flashEl.classList.add("go");
+  msgEl.classList.add("show");
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => msgEl.classList.remove("show"), CONFIG.unlockMessageMs); // fade-out suave via CSS
+}
+
+/* Suavização por "slot" de mão, feita a cada quadro de render (desacoplada da taxa de detecção) */
+const SM = [0, 1].map(() => ({ valid: false, present: false, nx: 0, ny: 0, z: 0, yaw: 0, pitch: 0, roll: 0 }));
+function smoothSlot(sm, h, dt) {
+  sm.present = !!h;
+  if (!h) return;
+  if (!sm.valid) { Object.assign(sm, { nx: h.nx, ny: h.ny, z: h.z, yaw: h.yaw, pitch: h.pitch, roll: h.roll, valid: true }); return; }
+  const k = damp(CONFIG.smoothing, dt);
+  for (const f of ["nx", "ny", "z", "yaw", "pitch", "roll"]) sm[f] += (h[f] - sm[f]) * k;
+}
+
+/* =====================================================================
+   GESTÃO DE MODOS
+   Cada modo é um objeto { life, enter(), exit(), update(ctx), drawOverlay?() }.
+   - enter(): cria TODOS os recursos Three.js do modo.
+   - exit():  descarta geometrias/materiais/texturas (disposeTree) → sem vazamento.
+   Troca suave: o modo antigo ("leaving") encolhe/desaparece enquanto o novo ("active")
+   aparece; só ao terminar o fade o modo antigo é descartado. A câmera e o loop de
+   captura nunca são tocados.
+   ===================================================================== */
+/* =====================================================================
+   TUTORIAL (card explicativo ao trocar de modo) e LABELS DIGITAIS
+   ===================================================================== */
+const TUTORIALS = [
+  { title: "Formas 3D", items: [
+    "Escolha a forma na barra inferior: <b>Cubo</b>, <b>Icosaedro</b>, <b>Pirâmide</b> ou <b>Toro</b>.",
+    "<b>Mover:</b> a forma segue a posição da sua palma na tela.",
+    "<b>Girar:</b> incline ou gire a mão; movimentos rápidos dão impulso à rotação.",
+    "<b>Escalar (pinça):</b> dobre médio, anelar e mindinho e <b>aproxime ou afaste polegar e indicador</b> para encolher ou esticar a forma. Ao abrir a mão, o tamanho é mantido.",
+  ] },
+  { title: "Pincel no ar", items: [
+    "<b>Desenhar:</b> estique só o dedo indicador e mova-o no ar.",
+    "<b>Trocar de cor:</b> clique na paleta ou segure a ponta do dedo sobre a cor por um instante.",
+    "<b>Limpar:</b> mantenha a mão aberta parada por ~1 s (anel de progresso) ou use o botão <b>Limpar</b>.",
+  ] },
+  { title: "Flor Higanbana", items: [
+    "<b>Suba/abaixe a mão</b> ou <b>afaste as duas mãos</b> para fazer os caules <b>CRESCEREM</b> (<code>grow</code>).",
+    "<b>Abra e feche os dedos</b> ou faça o <b>gesto de pinça</b> para fazer as pétalas <b>DESABROCHAREM</b> (<code>bloom</code>).",
+    "Acompanhe os valores de <code>grow</code> e <code>bloom</code> em % no painel à direita.",
+  ] },
+];
+let tutTimer;
+function showTutorial(i) {
+  const t = TUTORIALS[i];
+  $("tutTitle").textContent = `Modo ${i + 1} · ${t.title}`;
+  $("tutList").innerHTML = t.items.map((x) => `<li>${x}</li>`).join("");
+  $("tutNote").textContent = (CONFIG.requireUnlock && !state.unlocked) ? "Primeiro mostre a palma aberta para desbloquear." : "";
+  tutEl.classList.add("show");
+  const bar = $("tutTimer"); bar.style.animation = "none"; void bar.offsetWidth;
+  bar.style.animation = `tutTimer ${CONFIG.tutorialAutoHideMs}ms linear forwards`;
+  clearTimeout(tutTimer); tutTimer = setTimeout(hideTutorial, CONFIG.tutorialAutoHideMs);
+}
+function hideTutorial() { clearTimeout(tutTimer); tutEl.classList.remove("show"); }
+$("tutOk").addEventListener("click", hideTutorial);
+$("btnHelp").addEventListener("click", () => showTutorial(Math.max(activeIndex, 0)));
+
+// Painel de valores em tempo real (até 2 linhas). theme: "red" (flor) ou "cyan" (formas)
+const RO = [0, 1].map((i) => ({ box: $("ro" + i), k: $("roK" + i), v: $("roV" + i), bar: $("roB" + i) }));
+function setReadout(rows, theme) {
+  readoutEl.classList.toggle("cyan", theme === "cyan");
+  RO.forEach((r, i) => {
+    const d = rows[i];
+    r.box.style.display = d ? "" : "none";
+    if (!d) return;
+    if (r.k.textContent !== d.k) r.k.textContent = d.k;
+    r.v.textContent = d.v;
+    r.bar.style.transform = `scaleX(${clamp(d.p, 0, 1)})`;
+  });
+}
+
+const Modes = [];
+let active = null, leaving = null, activeIndex = -1, hoverTimer;
+const MODE_NAMES = ["Formas 3D", "Pincel no ar", "Higanbana"];
+
+function setMode(i) {
+  if (i === activeIndex || !scene) return;
+  if (leaving) finishLeaving();                 // troca rápida: descarta o anterior já
+  if (active) leaving = active;
+  activeIndex = i; active = Modes[i];
+  active.life = 0; active.enter();
+  document.querySelectorAll(".mode-btn").forEach((b) => {
+    const on = +b.dataset.mode === i;
+    b.classList.toggle("active", on); b.setAttribute("aria-pressed", on);
+  });
+  $("modeChip").textContent = `Modo ${i + 1} · ${MODE_NAMES[i]}`;
+  showTutorial(i);
+}
+function finishLeaving() { leaving.exit(); leaving.life = 0; leaving = null; }
+
+document.querySelectorAll(".mode-btn").forEach((btn) => {
+  const i = +btn.dataset.mode;
+  btn.addEventListener("click", () => setMode(i));
+  // passar o mouse também troca o modo (com pequeno atraso contra trocas acidentais)
+  btn.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") hoverTimer = setTimeout(() => setMode(i), CONFIG.hoverSwitchDelayMs); });
+  btn.addEventListener("pointerleave", () => clearTimeout(hoverTimer));
+});
+addEventListener("keydown", (e) => { if (["1", "2", "3"].includes(e.key)) setMode(+e.key - 1); });
+
+/* =====================================================================
+   MODO 1 · FORMAS GEOMÉTRICAS 3D (wireframe néon, vazias)
+   O usuário ESCOLHE uma forma na barra inferior (cubo, icosaedro, pirâmide, toro). Cada mão
+   detectada segura uma instância da forma escolhida:
+   - Mover:    a forma segue o centro da palma (compensando a perspectiva).
+   - Rotacionar: yaw/pitch/roll da palma + impulso de giro pela velocidade da mão.
+   - Escalar (pinça): com a pose "compasso" (médio/anelar/mindinho dobrados) ou com polegar e
+     indicador bem juntos, a distância polegar–indicador define a escala; ao abrir a mão a
+     escala atual é mantida.
+   Linhas aditivas + halo + pontos nos vértices dão o visual néon, sem preenchimento.
+   ===================================================================== */
+const SHAPE_DEFS = [
+  { name: "Cubo",      geo: () => new THREE.BoxGeometry(0.8, 0.8, 0.8) },
+  { name: "Icosaedro", geo: () => new THREE.IcosahedronGeometry(0.55, 0) },
+  { name: "Pirâmide",  geo: () => new THREE.ConeGeometry(0.62, 0.95, 4, 1).rotateY(Math.PI / 4) },
+  { name: "Toro",      geo: () => new THREE.TorusGeometry(0.45, 0.17, 14, 32) },
+];
+
+// Monta uma forma wireframe: arestas + halo (cópia maior e translúcida) + pontos nos vértices
+function buildShape(def, color) {
+  const geo = def.geo(), eg = new THREE.EdgesGeometry(geo, 1);
+  geo.dispose();
+  const mat = (op) => new THREE.LineBasicMaterial({ color, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false });
+  const holder = new THREE.Group();
+  const line = new THREE.LineSegments(eg, mat(0.95));
+  const glow = new THREE.LineSegments(eg, mat(0.28)); glow.scale.setScalar(1.06);
+  const pts = new THREE.Points(eg, new THREE.PointsMaterial({ color: 0xffffff, size: 0.045, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+  holder.add(line, glow, pts);
+  holder.userData.line = line; holder.userData.glow = glow;
+  return holder;
+}
+
+const ShapesMode = {
+  life: 0, usesReadout: true, group: null, clusters: [], shapeIdx: 0,
+  enter() {
+    this.group = new THREE.Group(); scene.add(this.group);
+    this.clusters = [0, 1].map((s) => {            // mão 0 (ciano) / mão 1 (magenta)
+      const g = new THREE.Group(); g.visible = false; this.group.add(g);
+      const cl = { group: g, holder: null, color: [0x00e5ff, 0xff4fd8][s], show: 0, pop: 0,
+                   stretch: 1, stretchTarget: 1, spinX: 0, spinY: 0, px: 0, py: 0, hasPrev: false };
+      this.fill(cl); return cl;
+    });
+    this.syncBar();
+  },
+  // (Re)cria a forma de um cluster, descartando a anterior (sem vazamento de memória)
+  fill(cl) {
+    if (cl.holder) disposeTree(cl.holder);
+    cl.holder = buildShape(SHAPE_DEFS[this.shapeIdx], cl.color);
+    cl.group.add(cl.holder); cl.pop = 0;           // "pop" = animação de entrada da nova forma
+  },
+  select(i) {
+    this.shapeIdx = i;
+    if (this.group) this.clusters.forEach((cl) => this.fill(cl));
+    this.syncBar();
+  },
+  syncBar() {
+    document.querySelectorAll(".shp").forEach((b) => {
+      const on = +b.dataset.shape === this.shapeIdx;
+      b.classList.toggle("sel", on); b.setAttribute("aria-pressed", on);
+    });
+  },
+  exit() {
+    disposeTree(this.group); this.group = null; this.clusters = [];
+    shapebarEl.style.opacity = 0; shapebarEl.style.pointerEvents = "none";
+    if (!(active && active.usesReadout)) readoutEl.style.opacity = 0;
+  },
+  update(c) {
+    const e = easeOutCubic(clamp(this.life, 0, 1)), T = CONFIG.tiltIntensity;
+    shapebarEl.style.opacity = e;
+    shapebarEl.style.pointerEvents = (this.life > 0.5 && active === this) ? "auto" : "none";
+
+    let info = null;
+    for (let s = 0; s < 2; s++) {
+      const cl = this.clusters[s], sm = c.sm[s], h = c.hands[s];
+      cl.show += (((sm.present && c.enabled) ? 1 : 0) - cl.show) * damp(10, c.dt);
+      cl.group.visible = cl.show > 0.01 && sm.valid;
+      if (!cl.group.visible) { cl.hasPrev = false; continue; }
+
+      // Mover + rotacionar com a palma
+      toWorld(sm.nx, sm.ny, sm.z, cl.group.position);
+      cl.group.rotation.set(sm.pitch * T, sm.yaw * T, sm.roll, "YXZ");
+
+      // Impulso de giro: a velocidade da mão alimenta uma rotação própria que decai
+      if (cl.hasPrev) {
+        const dt = Math.max(c.dt, 1e-3), vx = (sm.nx - cl.px) / dt, vy = (sm.ny - cl.py) / dt;
+        cl.spinY = clamp(cl.spinY + vx * c.dt * 3, -6, 6);
+        cl.spinX = clamp(cl.spinX - vy * c.dt * 3, -6, 6);
+      }
+      cl.px = sm.nx; cl.py = sm.ny; cl.hasPrev = true;
+      const decay = Math.exp(-1.2 * c.dt); cl.spinX *= decay; cl.spinY *= decay;
+      cl.holder.rotation.y += (0.35 + cl.spinY) * c.dt;
+      cl.holder.rotation.x += (0.12 + cl.spinX) * c.dt;
+
+      // Pinça: distância polegar–indicador → escala
+      let engaged = false;
+      if (h) {
+        engaged = h.caliper || h.pinchRatio < CONFIG.pinchEngageRatio;
+        if (engaged) cl.stretchTarget = lerp(CONFIG.shapeMinStretch, CONFIG.shapeMaxStretch, h.pinchNorm);
+      }
+      cl.stretch += (cl.stretchTarget - cl.stretch) * damp(CONFIG.stretchSmoothing, c.dt);
+      cl.pop += (1 - cl.pop) * damp(8, c.dt);
+      cl.group.scale.setScalar(Math.max(CONFIG.shapeBaseScale * cl.stretch * cl.show * e * cl.pop, 1e-4));
+
+      // Destaque visual enquanto a pinça está ativa
+      cl.holder.userData.line.material.opacity = engaged ? 1 : 0.85;
+      cl.holder.userData.glow.material.opacity = engaged ? 0.5 : 0.28;
+      if (!info) info = { cl, engaged, h };
+    }
+
+    // Labels digitais: escala e estado da pinça
+    const cl = info ? info.cl : this.clusters[0];
+    const span = CONFIG.shapeMaxStretch - CONFIG.shapeMinStretch;
+    setReadout([
+      { k: "ESCALA", v: cl.stretch.toFixed(2) + "×", p: (cl.stretch - CONFIG.shapeMinStretch) / span },
+      { k: "PINÇA", v: info && info.engaged ? Math.round(info.h.pinchNorm * 100) + "%" : "—", p: info && info.engaged ? info.h.pinchNorm : 0 },
+    ], "cyan");
+    readoutEl.style.opacity = e;
+  },
+};
+document.querySelectorAll(".shp").forEach((b) => b.addEventListener("click", () => ShapesMode.select(+b.dataset.shape)));
+
+/* =====================================================================
+   MODO 2 · PINCEL VIRTUAL (desenho no ar)
+   Pose de desenhar: só o indicador estendido → traço na ponta (landmark 8).
+   Cores: clique na paleta OU mantenha a ponta do dedo sobre a cor por um instante.
+   Limpar: botão "Limpar" OU mão aberta parada por ~1,2 s (com anel de progresso).
+   O desenho vive num <canvas> 2D; sai de cena com fade mas é preservado ao trocar de modo.
+   ===================================================================== */
+const BrushMode = {
+  life: 0, color: 0, cursor: { x: 0, y: 0, valid: false }, last: null, drawing: false, pointFrames: 0,
+  openHold: 0, armed: false, clearAt: null, dwellIdx: -1, dwell: 0, targets: [],
+  enter() {
+    paint.style.display = "block";
+    this.last = null; this.cursor.valid = false; this.armed = false; this.openHold = 0; this.dwell = 0; this.dwellIdx = -1;
+    if (!paletteEl.children.length) {
+      CONFIG.brushColors.forEach((col, i) => {
+        const b = document.createElement("button"); b.className = "swatch"; b.style.background = col;
+        b.style.boxShadow = `0 0 12px ${col}`; b.setAttribute("aria-label", "Cor " + (i + 1));
+        b.addEventListener("click", () => this.select(i)); paletteEl.appendChild(b);
+      });
+      const clr = document.createElement("button"); clr.id = "btnClear"; clr.textContent = "Limpar";
+      clr.addEventListener("click", () => this.clear()); paletteEl.appendChild(clr);
+    }
+    this.targets = [...paletteEl.children];
+    this.select(this.color);
+  },
+  exit() {
+    // Mantém o desenho; apenas esconde a camada e a paleta
+    paint.style.display = "none"; paint.style.opacity = 0;
+    paletteEl.style.opacity = 0; paletteEl.style.pointerEvents = "none";
+    this.targets.forEach((t) => t.classList.remove("hot"));
+    this.cursor.valid = false; this.last = null;
+  },
+  select(i) { this.color = i; [...paletteEl.querySelectorAll(".swatch")].forEach((s, k) => s.classList.toggle("sel", k === i)); },
+  clear() { pctx.clearRect(0, 0, paint.width, paint.height); this.last = null; },
+  update(c) {
+    const e = easeOutCubic(clamp(this.life, 0, 1));
+    paint.style.opacity = e; paletteEl.style.opacity = e;
+    paletteEl.style.pointerEvents = this.life > 0.5 && active === this ? "auto" : "none";
+    const h = c.hands.find((x) => x.pointing) || c.hands[0];
+    if (!h || !c.enabled) { this.cursor.valid = false; this.last = null; this.drawing = false; this.openHold = 0; this.dwell = 0; this.targets.forEach((t) => t.classList.remove("hot")); return; }
+
+    // Cursor suavizado na ponta do indicador
+    const cur = this.cursor;
+    if (!cur.valid) { cur.x = h.ix; cur.y = h.iy; cur.valid = true; }
+    else { const k = damp(CONFIG.brushSmoothing, c.dt); cur.x += (h.ix - cur.x) * k; cur.y += (h.iy - cur.y) * k; }
+
+    // Seleção por permanência sobre a paleta
+    let over = -1;
+    this.targets.forEach((t, i) => {
+      const r = t.getBoundingClientRect();
+      const inside = cur.x > r.left - 10 && cur.x < r.right + 10 && cur.y > r.top - 10 && cur.y < r.bottom + 10;
+      t.classList.toggle("hot", inside); if (inside) over = i;
+    });
+    if (over >= 0 && over === this.dwellIdx) {
+      this.dwell += c.dt * 1000;
+      if (this.dwell >= CONFIG.swatchDwellMs) { over < this.targets.length - 1 ? this.select(over) : this.clear(); this.dwell = -1e9; }
+    } else { this.dwellIdx = over; this.dwell = 0; }
+
+    // Desenho (precisa de 2 quadros de pose estável e não pode estar sobre a paleta)
+    this.pointFrames = h.pointing ? this.pointFrames + 1 : 0;
+    this.drawing = this.pointFrames >= 2 && over < 0;
+    if (this.drawing) {
+      if (this.last) this.segment(this.last.x, this.last.y, cur.x, cur.y);
+      this.last = { x: cur.x, y: cur.y };
+    } else this.last = null;
+
+    // Limpar: mão aberta segurada (precisa "rearmar" fechando a mão antes)
+    if (h.isOpen) {
+      this.clearAt = { x: h.sx, y: h.sy };
+      if (this.armed) {
+        this.openHold += c.dt * 1000;
+        if (this.openHold >= CONFIG.clearHoldMs) { this.clear(); this.armed = false; this.openHold = 0; }
+      }
+    } else { this.openHold = 0; this.armed = true; }
+  },
+  segment(x0, y0, x1, y1) {
+    const col = CONFIG.brushColors[this.color], d = state.dpr;
+    pctx.save(); pctx.lineCap = "round"; pctx.lineJoin = "round";
+    pctx.strokeStyle = col; pctx.shadowColor = col; pctx.shadowBlur = 14 * d; pctx.lineWidth = CONFIG.brushSize * d;
+    pctx.beginPath(); pctx.moveTo(x0 * d, y0 * d); pctx.lineTo(x1 * d, y1 * d); pctx.stroke(); pctx.restore();
+  },
+  drawOverlay(o, d, c) {
+    if (!this.cursor.valid || !c.enabled) return;
+    const col = CONFIG.brushColors[this.color];
+    o.save(); o.strokeStyle = col; o.fillStyle = col; o.lineWidth = 2 * d; o.shadowColor = col; o.shadowBlur = 12 * d;
+    o.beginPath(); o.arc(this.cursor.x * d, this.cursor.y * d, (this.drawing ? 6 : 13) * d, 0, Math.PI * 2);
+    this.drawing ? o.fill() : o.stroke();
+    if (this.openHold > 60 && this.clearAt) { // anel de progresso do "limpar"
+      const p = clamp(this.openHold / CONFIG.clearHoldMs, 0, 1);
+      o.strokeStyle = "#fff"; o.lineWidth = 4 * d; o.beginPath();
+      o.arc(this.clearAt.x * d, this.clearAt.y * d, 46 * d, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2); o.stroke();
+    }
+    o.restore();
+  },
+};
+
+/* =====================================================================
+   MODO 3 · FLOR PROCEDURAL (Higanbana / Lycoris radiata)
+   - Caules: TubeGeometry ao longo de curvas Catmull-Rom em leque, partindo da palma.
+     O crescimento revela o tubo com setDrawRange (sem recriar geometria).
+   - Flor: 6 pétalas finas e recurvadas (ribbon com morph target: botão → aberta) e
+     7 estames longos com anteras. Geometrias/materiais são COMPARTILHADOS entre todas as flores.
+   - grow  : 1 mão = altura da palma · 2 mãos = distância entre as mãos
+   - bloom : abertura dos dedos (ou distância da pinça quando em pose "compasso")
+   ===================================================================== */
+const FlowerMode = {
+  life: 0, usesReadout: true, group: null, roots: [], res: null, grow: [0, 0], bloom: [0, 0],
+  enter() {
+    this.group = new THREE.Group(); scene.add(this.group);
+    this.grow = [0, 0]; this.bloom = [0, 0];
+    this.res = this.buildShared();
+    this.roots = [0, 1].map(() => {
+      const root = new THREE.Group(); root.visible = false; this.group.add(root);
+      const N = CONFIG.flowerStems;
+      const stems = Array.from({ length: N }, (_, i) => this.buildStem(i, N, root));
+      return { root, stems };
+    });
+    readoutEl.style.opacity = 0;
+  },
+  exit() {
+    disposeTree(this.group); this.group = null; this.roots = []; this.res = null;
+    if (!(active && active.usesReadout)) readoutEl.style.opacity = 0;
+  },
+
+  // Geometria da pétala: tira curva (ao longo do comprimento) com largura afinada nas pontas.
+  petalPositions(L, W, curl, wave, seg) {
+    const pos = new Float32Array((seg + 1) * 6); let x = 0, y = 0;
+    for (let i = 0; i <= seg; i++) {
+      const s = i / seg;
+      if (i > 0) { const m = (i - 0.5) / seg, ph = curl * m * m, ds = L / seg; x += Math.sin(ph) * ds; y += Math.cos(ph) * ds; }
+      const w = W * Math.pow(Math.sin(Math.PI * Math.pow(s, 0.7)), 0.8);
+      const wv = wave * Math.sin(s * 16) * s, o = i * 6;
+      pos[o] = x + wv; pos[o + 1] = y; pos[o + 2] = w / 2;       // borda esquerda
+      pos[o + 3] = x - wv; pos[o + 4] = y; pos[o + 5] = -w / 2;  // borda direita
+    }
+    return pos;
+  },
+  buildShared() {
+    const SEG = 14, idx = [];
+    for (let i = 0; i < SEG; i++) { const a = 2 * i, b = a + 1, c = a + 2, d = a + 3; idx.push(a, b, c, b, d, c); }
+    // Forma fechada (botão) + morph target aberto (pétalas longas, recurvadas, levemente onduladas)
+    const closed = this.petalPositions(0.42, 0.05, 0.25, 0, SEG);
+    const open = this.petalPositions(0.72, 0.09, 1.7, 0.012, SEG);
+    const petalGeo = new THREE.BufferGeometry();
+    petalGeo.setAttribute("position", new THREE.BufferAttribute(closed, 3)); petalGeo.setIndex(idx);
+    petalGeo.computeVertexNormals();
+    const tmp = new THREE.BufferGeometry();
+    tmp.setAttribute("position", new THREE.BufferAttribute(open, 3)); tmp.setIndex(idx); tmp.computeVertexNormals();
+    petalGeo.morphAttributes.position = [new THREE.BufferAttribute(open, 3)];
+    petalGeo.morphAttributes.normal = [tmp.attributes.normal.clone()];
+    tmp.dispose();
+
+    // Estame: curva fina que sobe e se curva para fora
+    const sc = 0.8, pts = [[0, 0], [0.03, 0.3], [0.14, 0.65], [0.32, 0.92], [0.5, 1.02]].map(([x, y]) => new THREE.Vector3(x * sc, y * sc, 0));
+    const stamenGeo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 16, 0.007, 4, false);
+    stamenGeo.userData.tip = pts[pts.length - 1].clone();
+
+    return {
+      petalGeo, stamenGeo, antherGeo: new THREE.SphereGeometry(0.02, 8, 8),
+      petalMat: new THREE.MeshStandardMaterial({ color: 0xd10f2a, emissive: 0x6a0010, emissiveIntensity: 0.6, roughness: 0.45, side: THREE.DoubleSide }),
+      stamenMat: new THREE.MeshStandardMaterial({ color: 0xff3347, emissive: 0x5a0008, emissiveIntensity: 0.5, roughness: 0.5 }),
+      antherMat: new THREE.MeshStandardMaterial({ color: 0x3a0008, emissive: 0x200004, roughness: 0.6 }),
+      stemMat: new THREE.MeshStandardMaterial({ color: 0x2f8f46, emissive: 0x0a2a10, roughness: 0.7 }),
+    };
+  },
+  buildStem(i, N, root) {
+    const R = this.res, mid = (N - 1) / 2;
+    const a = (i - mid) * 0.30;                                   // abertura em leque
+    const L = 1.5 + Math.random() * 0.5 + (1 - Math.abs(i - mid) / N) * 0.25;
+    const zs = (i % 2 ? 0.18 : -0.18) * (0.5 + Math.random() * 0.5), bow = (Math.random() - 0.5) * 0.35;
+    const pts = [];
+    for (let k = 0; k <= 5; k++) {
+      const u = k / 5;
+      pts.push(new THREE.Vector3(Math.sin(a) * L * u + bow * Math.sin(Math.PI * u) * 0.5, Math.cos(a) * L * u, zs * L * u));
+    }
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const geo = new THREE.TubeGeometry(curve, 48, 0.02, 6, false);
+    const mesh = new THREE.Mesh(geo, R.stemMat); root.add(mesh);
+    geo.setDrawRange(0, 0);
+
+    // Flor na ponta
+    const fg = new THREE.Group(); fg.visible = false; root.add(fg);
+    const petals = [], stamens = [], rnd = Math.random();
+    for (let k = 0; k < 6; k++) {
+      const m = new THREE.Mesh(R.petalGeo, R.petalMat); m.rotation.order = "YXZ";
+      m.userData.ang = k * Math.PI / 3 + (rnd - 0.5) * 0.2; fg.add(m); petals.push(m);
+    }
+    for (let k = 0; k < 7; k++) {
+      const m = new THREE.Mesh(R.stamenGeo, R.stamenMat); m.rotation.order = "YXZ"; m.userData.ang = k * 2 * Math.PI / 7 + 0.3;
+      const an = new THREE.Mesh(R.antherGeo, R.antherMat); an.position.copy(R.stamenGeo.userData.tip); m.add(an);
+      fg.add(m); stamens.push(m);
+    }
+    return { curve, mesh, total: geo.index.count, flower: fg, petals, stamens };
+  },
+  poseFlower(st, bloom) {
+    st.petals.forEach((m, k) => {
+      const b = clamp((bloom - k * 0.015) / 0.91, 0, 1);            // pétalas abrem levemente escalonadas
+      m.morphTargetInfluences[0] = b;
+      m.rotation.set(0, m.userData.ang, -lerp(0, 0.5, b), "YXZ");
+    });
+    const b2 = smoothstep(0.1, 0.9, bloom);
+    st.stamens.forEach((m) => { m.scale.setScalar(lerp(0.15, 1, b2)); m.rotation.set(0, m.userData.ang, -lerp(0, 0.12, b2), "YXZ"); });
+  },
+  update(c) {
+    const e = easeOutCubic(clamp(this.life, 0, 1)), hands = c.hands, n = hands.length, F = CONFIG.flowerSize;
+
+    // --- grow: 1 mão = altura · 2 mãos = distância entre as mãos
+    let gT = [0, 0];
+    if (c.enabled) {
+      if (n >= 2) {
+        const d = Math.hypot(hands[0].sx - hands[1].sx, hands[0].sy - hands[1].sy) / state.cw;
+        const t = clamp((d - CONFIG.growDistMin) / (CONFIG.growDistMax - CONFIG.growDistMin), 0, 1); gT = [t, t];
+      } else if (n === 1) {
+        gT[0] = clamp((CONFIG.growHeightBottom - hands[0].sy / state.ch) / (CONFIG.growHeightBottom - CONFIG.growHeightTop), 0, 1);
+      }
+    }
+    for (let s = 0; s < 2; s++) {
+      const h = hands[s];
+      // --- bloom: abertura dos dedos, ou distância da pinça quando em pose "compasso"
+      const bT = (h && c.enabled) ? (h.caliper ? h.pinchNorm : h.openness) : 0;
+      this.grow[s] += (gT[s] - this.grow[s]) * damp(CONFIG.growSmoothing, c.dt);
+      this.bloom[s] += (bT - this.bloom[s]) * damp(CONFIG.bloomSmoothing, c.dt);
+
+      const { root, stems } = this.roots[s], sm = c.sm[s], g = this.grow[s];
+      root.visible = g > 0.003 && sm.valid;
+      if (!root.visible) continue;
+      if (sm.present) { // ao perder a mão, a planta mantém a última pose e recolhe
+        toWorld(sm.nx, sm.ny, sm.z, root.position);
+        root.rotation.set(sm.pitch * 0.35, sm.yaw * 0.35, sm.roll, "YXZ");
+      }
+      root.scale.setScalar(Math.max(CONFIG.flowerScale * e, 1e-4));
+
+      stems.forEach((st, i) => {
+        const gi = clamp(g * 1.3 - i * 0.07, 0, 1);                  // caules crescem em sequência
+        st.mesh.geometry.setDrawRange(0, Math.floor(gi * st.total / 6) * 6);
+        const bud = smoothstep(0.6, 0.95, gi);
+        if (bud > 0.001 && gi > 0) {
+          st.curve.getPointAt(gi, tmpP); st.curve.getTangentAt(gi, tmpT);
+          st.flower.position.copy(tmpP); st.flower.quaternion.setFromUnitVectors(UP, tmpT);
+          st.flower.scale.setScalar(F * bud * (0.75 + 0.25 * this.bloom[s]));
+          this.poseFlower(st, this.bloom[s]); st.flower.visible = true;
+        } else st.flower.visible = false;
+      });
+    }
+
+    // --- labels digitais
+    const gV = Math.max(this.grow[0], this.grow[1]), bV = Math.max(this.bloom[0], this.bloom[1]);
+    setReadout([
+      { k: "GROW", v: Math.round(gV * 100) + "%", p: gV },
+      { k: "BLOOM", v: Math.round(bV * 100) + "%", p: bV },
+    ], "red");
+    readoutEl.style.opacity = e;
+  },
+};
+
+Modes.push(ShapesMode, BrushMode, FlowerMode);
+
+/* =====================================================================
+   DESENHO DO ESQUELETO (grafo tecnológico)
+   ===================================================================== */
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]
+];
+const SKEL_COLORS = ["0,229,255", "255,79,216"]; // mão 0 / mão 1
+function drawSkeleton(lms, t, rgb) {
+  const s = screenMap(), d = state.dpr;
+  const pts = lms.map((l) => ({ x: (s.ox + (1 - l.x) * s.dw) * d, y: (s.oy + l.y * s.dh) * d }));
+  octx.save(); octx.lineCap = "round";
+  octx.shadowColor = `rgb(${rgb})`; octx.shadowBlur = 12 * d;
+  octx.strokeStyle = `rgba(${rgb},0.7)`; octx.lineWidth = 1.4 * d;
+  octx.beginPath();
+  for (const [a, b] of CONNECTIONS) { octx.moveTo(pts[a].x, pts[a].y); octx.lineTo(pts[b].x, pts[b].y); }
+  octx.stroke();
+  const pulse = 0.5 + 0.5 * Math.sin(t / 220);
+  for (let i = 0; i < pts.length; i++) {
+    const tip = [4, 8, 12, 16, 20].includes(i);
+    octx.shadowBlur = (tip ? 18 + 6 * pulse : 10) * d;
+    octx.fillStyle = tip ? "#ffffff" : `rgb(${rgb})`;
+    octx.beginPath(); octx.arc(pts[i].x, pts[i].y, (tip ? 4.2 : 2.8) * d, 0, Math.PI * 2); octx.fill();
+  }
+  octx.restore();
+}
+
+/* =====================================================================
+   LOOP DE RENDERIZAÇÃO (independente do loop de detecção)
+   ===================================================================== */
+let lastT = performance.now(), fpsT = lastT, scannerOn = false, chipCache = "";
+function setScanner(on) { if (on !== scannerOn) { scannerOn = on; scannerEl.classList.toggle("running", on); } }
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+
+  const fresh = now - state.lastHandTime < CONFIG.handLostTimeoutMs;
+  const hs = fresh ? state.hands : [];
+
+  // Scanner: só roda sem nenhuma mão no quadro (para IMEDIATAMENTE quando há mão)
+  setScanner(state.ready && hs.length === 0);
+
+  smoothSlot(SM[0], hs[0], dt); smoothSlot(SM[1], hs[1], dt);
+  const ctx = { dt, now, hands: hs, sm: SM, enabled: state.unlocked || !CONFIG.requireUnlock };
+
+  if (leaving) {
+    leaving.life -= dt / (CONFIG.modeFadeOutMs / 1000);
+    if (leaving.life <= 0) finishLeaving(); else leaving.update(ctx);
+  }
+  if (active) {
+    active.life = Math.min(1, active.life + dt / (CONFIG.modeFadeInMs / 1000));
+    active.update(ctx);
+  }
+  renderer.render(scene, camera);
+
+  // Overlay: esqueletos + extras do modo
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  hs.forEach((h, i) => drawSkeleton(h.lms, now, SKEL_COLORS[i % 2]));
+  if (active && active.drawOverlay) active.drawOverlay(octx, state.dpr, ctx);
+
+  // Chip de status das mãos
+  if (state.ready) {
+    const txt = hs.length === 0 ? "Nenhuma mão detectada"
+      : !state.unlocked && CONFIG.requireUnlock ? "Mão detectada · mostre a palma aberta"
+      : `${hs.length} mão${hs.length > 1 ? "s" : ""} detectada${hs.length > 1 ? "s" : ""}`;
+    if (txt !== chipCache) { chipCache = txt; setHand(txt, hs.length ? "on" : ""); }
+  }
+
+  state.renderCount++;
+  if (now - fpsT >= 1000) {
+    state.renderFps = state.renderCount; state.renderCount = 0;
+    state.detFps = state.detCount; state.detCount = 0; fpsT = now;
+    if (CONFIG.showFps) $("fpsText").textContent = `Detecção ${state.detFps} · Render ${state.renderFps} FPS`;
+  }
+}
+
+/* =====================================================================
+   CÂMERA (inalterada em comportamento: erros claros + espelhamento via CSS)
+   ===================================================================== */
+let stream = null;
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw Object.assign(new Error("insecure"), { friendly: true,
+      title: "Câmera indisponível neste contexto",
+      msg: "O navegador só libera a webcam em páginas seguras. Abra via <b>https://</b> ou <b>http://localhost</b> (ex.: Live Server do VS Code ou <code>python3 -m http.server</code>)." });
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: "user", width: { ideal: CONFIG.cameraIdeal.width }, height: { ideal: CONFIG.cameraIdeal.height }, frameRate: { ideal: CONFIG.cameraIdeal.frameRate } },
+    });
+  } catch (e) {
+    const map = {
+      NotAllowedError: ["Permissão da câmera negada", "Você bloqueou o acesso à webcam. Clique no ícone de cadeado/câmera na barra de endereço, permita a câmera para esta página e tente novamente."],
+      PermissionDeniedError: ["Permissão da câmera negada", "Permita o acesso à webcam nas configurações do navegador e tente novamente."],
+      NotFoundError: ["Nenhuma câmera encontrada", "Não foi possível detectar uma webcam. Conecte uma câmera e tente novamente."],
+      DevicesNotFoundError: ["Nenhuma câmera encontrada", "Conecte uma webcam e tente novamente."],
+      NotReadableError: ["Câmera em uso", "A câmera parece estar sendo usada por outro aplicativo (Zoom, Meet, outra aba…). Feche-o e tente novamente."],
+      TrackStartError: ["Câmera em uso", "Feche outros aplicativos que usam a câmera e tente novamente."],
+      OverconstrainedError: ["Câmera incompatível", "A câmera não suporta a resolução pedida. Reduza CONFIG.cameraIdeal e tente novamente."],
+      SecurityError: ["Bloqueado por segurança", "O navegador bloqueou a câmera. Use https:// ou http://localhost."],
+    };
+    const [title, msg] = map[e.name] || ["Erro ao acessar a câmera", `${e.name || "Erro"}: ${e.message || "falha desconhecida"}`];
+    throw Object.assign(e, { friendly: true, title, msg });
+  }
+  video.srcObject = stream;
+  await new Promise((res) => { video.onloadedmetadata = res; });
+  await video.play();
+  state.vw = video.videoWidth || 1280; state.vh = video.videoHeight || 720;
+  stream.getVideoTracks()[0].addEventListener("ended", () => {
+    state.ready = false; running = false; setCam("Câmera desconectada", "warn");
+    showPanel("Câmera desconectada", "O feed de vídeo foi interrompido. Reconecte a câmera e tente novamente.", () => location.reload());
+  });
+}
+
+/* =====================================================================
+   MEDIAPIPE HANDS (até 2 mãos)
+   ===================================================================== */
+let hands = null, running = false;
+async function startTracking() {
+  hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${MEDIAPIPE_HANDS_VERSION}/${f}` });
+  hands.setOptions({
+    maxNumHands: CONFIG.maxNumHands,
+    modelComplexity: CONFIG.modelComplexity,
+    minDetectionConfidence: CONFIG.minDetectionConfidence,
+    minTrackingConfidence: CONFIG.minTrackingConfidence,
+  });
+  hands.onResults(onResults);
+  setCam("Carregando modelo…", "warn");
+  await hands.initialize(); // baixa o modelo/WASM; falha aqui = CDN/rede
+  setCam("Câmera ativa", "ok");
+  running = true; state.ready = true;
+
+  // Loop de detecção: envia o quadro mais recente assim que o anterior termina (throughput máximo)
+  let busy = false, lastVT = -1, errors = 0;
+  const useRVFC = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+  const tick = async () => {
+    if (!running) return;
+    if (!busy && video.readyState >= 2 && (useRVFC || video.currentTime !== lastVT)) {
+      busy = true; lastVT = video.currentTime;
+      try { await hands.send({ image: video }); errors = 0; }
+      catch (e) {
+        console.error("Erro na detecção:", e);
+        if (++errors > 20) {
+          running = false; state.ready = false;
+          showPanel("Falha no rastreamento", "O modelo de detecção parou de responder. Recarregue a página ou reduza <code>CONFIG.modelComplexity</code> para 0.", () => location.reload());
+          return;
+        }
+      }
+      busy = false;
+    }
+    useRVFC ? video.requestVideoFrameCallback(tick) : requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+/* =====================================================================
+   INICIALIZAÇÃO
+   ===================================================================== */
+let loopStarted = false;
+async function init() {
+  hidePanel();
+  // 1) Verifica bibliotecas de CDN
+  const missing = (window.__cdnFail || []).slice();
+  if (typeof THREE === "undefined" && !missing.some((m) => m.startsWith("Three"))) missing.push("Three.js");
+  if (typeof Hands === "undefined" && !missing.some((m) => m.startsWith("MediaPipe"))) missing.push("MediaPipe Hands");
+  if (missing.length) {
+    setCam("Erro de CDN", "warn");
+    showPanel("Não foi possível carregar bibliotecas",
+      `Falha ao baixar: <b>${missing.join(", ")}</b>.<br>Verifique sua conexão, desative bloqueadores que impeçam o jsDelivr e recarregue a página.`,
+      () => location.reload());
+    return;
+  }
+  try {
+    // 2) Cena 3D + modo inicial
+    if (!renderer) { initThree(); resize(); setMode(0); }
+    if (!loopStarted) { loopStarted = true; requestAnimationFrame(frame); }
+
+    // 3) Câmera + rastreamento (o loop de captura nunca é reiniciado ao trocar de modo)
+    setCam("Solicitando câmera…", "warn");
+    await startCamera();
+    resize();
+    await startTracking();
+  } catch (e) {
+    console.error(e);
+    setCam("Erro", "warn");
+    if (e.friendly) showPanel(e.title, e.msg, init);
+    else showPanel("Erro ao iniciar", `${e.message || e}<br><br>Se o erro menciona o modelo do MediaPipe, verifique a conexão e recarregue.`, init);
+  }
+}
+
+if (document.readyState === "complete") init();
+else addEventListener("load", init);
+</script>
+</body>
+</html>
